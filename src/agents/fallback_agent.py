@@ -12,12 +12,10 @@ from mcp.client.streamable_http import streamablehttp_client
 from strands import Agent
 from strands.tools.mcp import MCPClient
 
+from server.constants import DEFAULT_MCP_SERVER_URL
 from utils.logging_helpers import get_logger, log_info_event
 
 logger = get_logger(__name__)
-
-# Default URL for the OpenSearch MCP server (Streamable HTTP).
-DEFAULT_MCP_SERVER_URL = "http://localhost:3001/mcp"
 
 FALLBACK_SYSTEM_PROMPT = """You are a helpful OpenSearch assistant. You help users understand
 and manage their OpenSearch clusters.

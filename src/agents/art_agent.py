@@ -17,17 +17,17 @@ import os
 
 from strands import Agent
 
-from utils.logging_helpers import get_logger, log_info_event
 from mcp.client.streamable_http import streamablehttp_client
 from strands.tools.mcp import MCPClient
+
+from server.constants import DEFAULT_MCP_SERVER_URL
+from utils.logging_helpers import get_logger, log_info_event
 
 logger = get_logger(__name__)
 
 # Default Bedrock model — same as Strands SDK default.
 # Used when BEDROCK_INFERENCE_PROFILE_ARN is not explicitly set.
 _DEFAULT_BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
-
-DEFAULT_MCP_SERVER_URL = "http://localhost:3001/mcp"
 
 ART_SYSTEM_PROMPT="You are an expert search relevance tuning system."
 

@@ -236,6 +236,12 @@ DEFAULT_MIME_TYPE: str = "application/octet-stream"
 """Default MIME type used when file MIME type cannot be determined."""
 
 # Default user message when no message content is available
+DEFAULT_MCP_SERVER_URL: str = "http://localhost:3001/mcp"
+"""Default URL for the OpenSearch MCP server (Streamable HTTP).
+
+Overridden by the MCP_SERVER_URL environment variable.
+"""
+
 DEFAULT_USER_MESSAGE: str = "Hello"
 """Default message text used when no user message content is available."""
 
