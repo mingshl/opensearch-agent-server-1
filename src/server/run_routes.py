@@ -52,6 +52,23 @@ from utils.logging_helpers import get_logger, log_info_event, log_warning_event
 
 logger = get_logger(__name__)
 
+# Headers to forward from the incoming request to the MCP server.
+_AUTH_HEADERS_TO_FORWARD = ("authorization",)
+
+
+def _extract_auth_headers(request: Request) -> dict[str, str] | None:
+    """Extract authentication headers from the incoming request.
+
+    Returns a dict of headers to forward to the MCP server, or None if no
+    relevant auth headers are present.
+    """
+    headers: dict[str, str] = {}
+    for header_name in _AUTH_HEADERS_TO_FORWARD:
+        value = request.headers.get(header_name)
+        if value:
+            headers[header_name] = value
+    return headers or None
+
 
 def create_run_route(
     orchestrator: AgentOrchestrator,
@@ -114,6 +131,10 @@ def create_run_route(
         save_initial_messages(persistence, run_agent_input, thread_id, run_id)
         ensure_thread_has_title(persistence, thread_id, run_agent_input)
 
+    # Extract authentication headers to forward to the MCP server so that
+    # tool calls against OpenSearch are made with the caller's credentials.
+    forwarded_headers = _extract_auth_headers(request)
+
     message_count = len(input_data.messages)
     log_info_event(
         logger,
@@ -152,6 +173,7 @@ def create_run_route(
             user_id=user_id,
             start_time=start_time,
             config=config,
+            headers=forwarded_headers,
         )
 
         async def consume_event_generator() -> None:

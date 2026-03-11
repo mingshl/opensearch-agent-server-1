@@ -157,6 +157,7 @@ async def _process_event_stream(
     event_processor: AGUIEventProcessor,
     run_id: str,
     thread_id: str,
+    headers: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
     """Process the AG-UI event stream from the orchestrator.
 
@@ -168,7 +169,7 @@ async def _process_event_stream(
     current_message_id = None
     current_message_content: list = []
 
-    async for event in orchestrator.run(input_data):
+    async for event in orchestrator.run(input_data, headers=headers):
         current_message_id, current_message_content, encoded_event = (
             event_processor.process_event(
                 event,
@@ -281,6 +282,7 @@ async def generate_events(
     user_id: str,
     start_time: datetime,
     config: ServerConfig | None = None,
+    headers: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
     """Generate SSE events from the orchestrator with processing.
 
@@ -293,6 +295,7 @@ async def generate_events(
         user_id: User identifier.
         start_time: Start time for duration calculation.
         config: Optional ServerConfig (unused, kept for API compatibility).
+        headers: Optional HTTP headers to forward to the MCP server.
 
     Yields:
         Encoded SSE event strings.
@@ -306,6 +309,7 @@ async def generate_events(
             event_processor,
             run_id,
             thread_id,
+            headers=headers,
         ):
             event_count += 1
             yield encoded_event

@@ -62,12 +62,13 @@ Default: 1000 requests per hour.
 """
 
 # Default authentication configuration
-DEFAULT_AUTH_ENABLED: bool = True
+DEFAULT_AUTH_ENABLED: bool = False
 """Default authentication enabled status.
 
 Set via AG_UI_AUTH_ENABLED environment variable:
-- "true": Authentication enabled (default)
-- "false": Authentication disabled (for development only)
+- "true": Authentication enabled (agent server enforces auth)
+- "false": Authentication disabled (default) — auth headers are still
+  forwarded to the MCP server so OpenSearch can enforce authentication.
 """
 
 DEFAULT_AUTH_MODE: str = "strict"

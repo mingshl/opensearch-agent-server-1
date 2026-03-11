@@ -38,7 +38,7 @@ if not os.getenv("AWS_ACCESS_KEY_ID"):
     if os.path.isfile(_cred_file):
         import configparser
 
-        _cp = configparser.ConfigParser()
+        _cp = configparser.ConfigParser(strict=False)
         _cp.read(_cred_file)
         _profile = os.getenv("AWS_PROFILE", "default")
         if _cp.has_section(_profile):

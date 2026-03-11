@@ -253,7 +253,7 @@ def create_app(config_override: ServerConfig | None = None) -> FastAPI:
 
         setup_rate_limiting(app, rate_limiter)
 
-        # --- Orchestrator setup: create agents eagerly ---
+        # --- Orchestrator setup: register agent factories ---
         from agents.art_agent import create_art_agent
         from agents.fallback_agent import create_fallback_agent
         from orchestrator.registry import AgentRegistration, AgentRegistry
@@ -292,56 +292,38 @@ def create_app(config_override: ServerConfig | None = None) -> FastAPI:
 
         router = PageContextRouter(registry)
 
-        # Create orchestrator and eagerly initialize agents
+        # Create orchestrator with agent factories.  Agents are created
+        # per-request so that the caller's auth headers can be forwarded
+        # to the MCP server (and ultimately to OpenSearch).
         orchestrator = AgentOrchestrator(router)
 
-        # Create fallback agent eagerly
-        try:
-            fallback_agent = await asyncio.to_thread(
-                create_fallback_agent, opensearch_url
-            )
-            orchestrator.register_agent(
-                name="fallback",
-                strands_agent=fallback_agent,
-                description="General OpenSearch assistant with MCP tools",
-            )
-            log_info_event(
-                logger,
-                "✓ Fallback agent created and registered",
-                "ag_ui.fallback_agent_ready",
-            )
-        except Exception as e:
-            log_error_event(
-                logger,
-                f"✗ Failed to create fallback agent: {e}",
-                "ag_ui.fallback_agent_creation_failed",
-                error=str(e),
-                exc_info=True,
-            )
+        # Register fallback agent factory
+        orchestrator.register_agent_factory(
+            name="fallback",
+            factory=lambda headers: create_fallback_agent(
+                opensearch_url, headers=headers
+            ),
+            description="General OpenSearch assistant with MCP tools",
+        )
+        log_info_event(
+            logger,
+            "✓ Fallback agent factory registered",
+            "ag_ui.fallback_agent_factory_ready",
+        )
 
-        # Create ART agent eagerly
-        try:
-            art_agent = await asyncio.to_thread(
-                create_art_agent, opensearch_url
-            )
-            orchestrator.register_agent(
-                name="art",
-                strands_agent=art_agent,
-                description="Search Relevance Testing agent (ART)",
-            )
-            log_info_event(
-                logger,
-                "✓ ART agent created and registered",
-                "ag_ui.art_agent_ready",
-            )
-        except Exception as e:
-            log_warning_event(
-                logger,
-                f"✗ ART agent not available (os_art not installed?): {e}",
-                "ag_ui.art_agent_creation_failed",
-                error=str(e),
-                exc_info=True,
-            )
+        # Register ART agent factory
+        orchestrator.register_agent_factory(
+            name="art",
+            factory=lambda headers: create_art_agent(
+                opensearch_url, headers=headers
+            ),
+            description="Search Relevance Testing agent (ART)",
+        )
+        log_info_event(
+            logger,
+            "✓ ART agent factory registered",
+            "ag_ui.art_agent_factory_ready",
+        )
 
         yield
 

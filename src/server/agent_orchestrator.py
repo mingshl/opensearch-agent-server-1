@@ -1,15 +1,16 @@
 """Agent Orchestrator — routes requests to AG-UI Strands agent wrappers.
 
-Holds a dictionary of ``ag_ui_strands.StrandsAgent`` wrappers keyed by agent
-name.  The outer shell (routing, auth, persistence, SSE encoding, cancellation)
-remains custom; this module is the thin glue between the router and the
-off-the-shelf AG-UI event conversion layer.
+Creates ``ag_ui_strands.StrandsAgent`` wrappers per-request so that
+per-request HTTP headers (e.g. Authorization) can be forwarded to the
+MCP server.  The outer shell (routing, auth, persistence, SSE encoding,
+cancellation) remains custom; this module is the thin glue between the
+router and the off-the-shelf AG-UI event conversion layer.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from ag_ui.core import RunAgentInput
@@ -21,6 +22,10 @@ from orchestrator.router import PageContextRouter
 from utils.logging_helpers import get_logger, log_debug_event, log_info_event
 
 logger = get_logger(__name__)
+
+# A factory callable that receives optional HTTP headers and returns a
+# pre-configured Strands Agent.
+AgentFactory = Callable[[dict[str, str] | None], StrandsAgentCore]
 
 
 def _extract_app_id_from_context(context: list) -> str | None:
@@ -79,46 +84,53 @@ def _extract_page_context(input_data: RunAgentInput) -> str | None:
 class AgentOrchestrator:
     """Routes AG-UI requests to the appropriate ``ag_ui_strands.StrandsAgent``.
 
-    Each sub-agent type (ART, fallback, …) is registered as a named wrapper.
-    ``run()`` resolves the agent name via :class:`PageContextRouter` and
-    delegates to the wrapper's ``.run()``, yielding AG-UI events.
+    Instead of holding pre-created agents, the orchestrator stores *factory*
+    functions.  Each factory receives optional HTTP headers and returns a
+    fresh ``StrandsAgentCore``.  This allows per-request credentials
+    (e.g. ``Authorization``) to be forwarded to the MCP server.
+
+    ``run()`` resolves the agent name via :class:`PageContextRouter`,
+    creates an agent from the factory, wraps it in ``AGUIStrandsAgent``,
+    and yields AG-UI events.
     """
 
     def __init__(self, router: PageContextRouter) -> None:
-        self._agents: dict[str, AGUIStrandsAgent] = {}
+        self._agent_factories: dict[str, dict[str, Any]] = {}
         self._router = router
 
-    def register_agent(
+    def register_agent_factory(
         self,
         name: str,
-        strands_agent: StrandsAgentCore,
+        factory: AgentFactory,
         description: str = "",
         config: StrandsAgentConfig | None = None,
     ) -> None:
-        """Wrap *strands_agent* in ``ag_ui_strands.StrandsAgent`` and store it.
+        """Register an agent factory for on-demand agent creation.
 
         Args:
             name: Unique agent name (must match registry name).
-            strands_agent: Pre-initialized Strands Agent.
+            factory: Callable that accepts optional headers dict and
+                returns a pre-configured Strands Agent.
             description: Human-readable description.
             config: Optional tool-behavior configuration.
         """
-        agui_agent = AGUIStrandsAgent(
-            agent=strands_agent,
-            name=name,
-            description=description,
-            config=config,
-        )
-        self._agents[name] = agui_agent
+        self._agent_factories[name] = {
+            "factory": factory,
+            "description": description,
+            "config": config,
+        }
         log_info_event(
             logger,
-            f"Registered agent '{name}' in orchestrator",
-            "orchestrator.agent_registered",
+            f"Registered agent factory '{name}' in orchestrator",
+            "orchestrator.agent_factory_registered",
             agent_name=name,
         )
 
     async def run(
-        self, input_data: RunAgentInput, agent_name: str | None = None
+        self,
+        input_data: RunAgentInput,
+        agent_name: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> AsyncIterator[Any]:
         """Yield AG-UI events for *input_data*.
 
@@ -129,6 +141,8 @@ class AgentOrchestrator:
         Args:
             input_data: AG-UI ``RunAgentInput``.
             agent_name: Explicit agent name (skips routing).
+            headers: Optional HTTP headers to forward to the MCP server
+                (e.g. Authorization for OpenSearch authentication).
 
         Yields:
             AG-UI protocol events.
@@ -145,12 +159,30 @@ class AgentOrchestrator:
                 agent_name=agent_name,
             )
 
-        agent = self._agents.get(agent_name)
-        if agent is None:
+        factory_info = self._agent_factories.get(agent_name)
+        if factory_info is None:
             raise RuntimeError(
-                f"No agent registered with name '{agent_name}'. "
-                f"Available: {list(self._agents)}"
+                f"No agent factory registered with name '{agent_name}'. "
+                f"Available: {list(self._agent_factories)}"
             )
 
-        async for event in agent.run(input_data):
+        # Create a fresh agent with the request's auth headers
+        strands_agent = factory_info["factory"](headers)
+        agui_agent = AGUIStrandsAgent(
+            agent=strands_agent,
+            name=agent_name,
+            description=factory_info["description"],
+            config=factory_info["config"],
+        )
+
+        log_debug_event(
+            logger,
+            f"Created per-request agent '{agent_name}' "
+            f"(with_auth_headers={headers is not None})",
+            "orchestrator.agent_created",
+            agent_name=agent_name,
+            with_auth_headers=headers is not None,
+        )
+
+        async for event in agui_agent.run(input_data):
             yield event
