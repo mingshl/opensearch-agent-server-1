@@ -13,7 +13,9 @@
 #
 # Usage:
 #   ./scripts/quickstart.sh              # full setup + start
+#   ./scripts/quickstart.sh --security   # full setup + start with security enabled
 #   ./scripts/quickstart.sh --start      # start only (skip clone/build)
+#   ./scripts/quickstart.sh --start --security  # start only, with security
 #   ./scripts/quickstart.sh --stop       # stop all running services
 #   ./scripts/quickstart.sh --status     # check service status
 #
@@ -38,6 +40,11 @@ ML_COMMONS_REPO="https://github.com/mingshl/ml-commons.git"
 ML_COMMONS_BRANCH="origin/main-test-search-relevance"
 DASHBOARDS_REPO="https://github.com/opensearch-project/OpenSearch-Dashboards.git"
 SEARCH_RELEVANCE_REPO="https://github.com/opensearch-project/search-relevance.git"
+
+# --- Security ----------------------------------------------------------------
+SECURITY_REPO="https://github.com/opensearch-project/security.git"
+SECURITY_ENABLED=false
+ADMIN_PASSWORD="admin"
 
 # --- Ports -------------------------------------------------------------------
 OS_PORT=9200
@@ -213,13 +220,67 @@ start_opensearch() {
   local mlc_dir="$WORKSPACE/ml-commons"
   mkdir -p "$LOG_DIR"
 
+  local gradle_args="-Dstreaming=true -Dsearch.relevance=true --preserve-data"
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    gradle_args="-Dsecurity=true -Duser=admin -Dpassword=$ADMIN_PASSWORD $gradle_args"
+    info "Security enabled — OpenSearch will use HTTPS with admin credentials"
+
+    # Patch build.gradle so the 'run' task uses HTTPS-aware health check.
+    # Without this, 'gradlew run' uses the default HTTP health check which
+    # fails against an HTTPS-secured cluster (NotSslRecordException).
+    local build_gradle="$mlc_dir/plugin/build.gradle"
+    if ! grep -q "QUICKSTART_RUN_TASK_SECURITY_PATCH" "$build_gradle" 2>/dev/null; then
+      info "Patching build.gradle for security-aware 'run' task health check..."
+      cat >> "$build_gradle" <<'GRADLE_PATCH'
+
+// --- QUICKSTART_RUN_TASK_SECURITY_PATCH ---
+// Override default HTTP wait conditions on the 'run' task so that
+// security-enabled clusters are health-checked over HTTPS.
+tasks.matching { it.name == 'run' }.configureEach {
+    doFirst {
+        getClusters().forEach { cluster ->
+            waitForClusterSetup(cluster, securityEnabled)
+        }
+    }
+}
+GRADLE_PATCH
+    fi
+
+    # Ensure security certs are downloaded and placed in test resources
+    # (processTestResources downloads them from GitHub and copies to build/resources/test/)
+    info "Downloading security certificates..."
+    OPENSEARCH_CORE_PATH="$WORKSPACE/OpenSearch" \
+    OPENSEARCH_INITIAL_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+      bash -c "cd '$mlc_dir' && ./gradlew processTestResources -Dsecurity=true" \
+      >> "$LOG_DIR/opensearch.log" 2>&1
+  fi
+
   OPENSEARCH_CORE_PATH="$WORKSPACE/OpenSearch" \
-    bash -c "cd '$mlc_dir' && exec ./gradlew run -Dstreaming=true -Dsearch.relevance=true --preserve-data" \
+  OPENSEARCH_INITIAL_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+    bash -c "cd '$mlc_dir' && exec ./gradlew run $gradle_args" \
     > "$LOG_DIR/opensearch.log" 2>&1 &
   disown
   save_pid "opensearch" $!
 
   wait_for_port $OS_PORT "OpenSearch" 300
+
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    info "Waiting for security plugin to initialize..."
+    local sec_elapsed=0 sec_max=60
+    while [[ $sec_elapsed -lt $sec_max ]]; do
+      local verify_status
+      verify_status=$(curl -sk -u "admin:$ADMIN_PASSWORD" -o /dev/null -w "%{http_code}" "https://localhost:$OS_PORT" 2>/dev/null)
+      if [[ "$verify_status" == "200" ]]; then
+        ok "Secured OpenSearch ready (HTTPS, admin credentials verified)"
+        break
+      fi
+      sleep 3
+      sec_elapsed=$((sec_elapsed + 3))
+    done
+    if [[ $sec_elapsed -ge $sec_max ]]; then
+      warn "Security plugin did not fully initialize within ${sec_max}s (last HTTP $verify_status)"
+    fi
+  fi
 }
 
 # =============================================================================
@@ -241,10 +302,52 @@ setup_dashboards() {
   fi
 }
 
+configure_dashboards_security() {
+  local osd_dir="$WORKSPACE/OpenSearch-Dashboards"
+  local config_file="$osd_dir/config/opensearch_dashboards.yml"
+  local backup_file="$config_file.bak.nosecurity"
+
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    # Back up original config (only once)
+    if [[ ! -f "$backup_file" ]]; then
+      cp "$config_file" "$backup_file"
+    fi
+
+    info "Configuring Dashboards for secured OpenSearch (HTTPS)..."
+
+    # Find the test cluster's cert directory for root-ca.pem
+    local cert_dir
+    cert_dir=$(find "$WORKSPACE/ml-commons/plugin/build/testclusters" \
+      -name "root-ca.pem" -type f 2>/dev/null | head -1)
+    cert_dir=$(dirname "$cert_dir" 2>/dev/null || true)
+
+    # Write security-aware config
+    cat > "$config_file" <<DASHCFG
+server.host: "0.0.0.0"
+opensearch.hosts: ["https://localhost:9200"]
+opensearch.username: "admin"
+opensearch.password: "$ADMIN_PASSWORD"
+opensearch.ssl.verificationMode: none
+opensearch.requestHeadersAllowlist: ["authorization", "securitytenant"]
+DASHCFG
+    ok "Dashboards configured for HTTPS"
+  else
+    # Restore non-security config if backup exists
+    local config_file="$osd_dir/config/opensearch_dashboards.yml"
+    local backup_file="$config_file.bak.nosecurity"
+    if [[ -f "$backup_file" ]]; then
+      cp "$backup_file" "$config_file"
+      info "Dashboards config restored to non-security mode"
+    fi
+  fi
+}
+
 start_dashboards() {
   info "Starting OpenSearch Dashboards..."
   local osd_dir="$WORKSPACE/OpenSearch-Dashboards"
   mkdir -p "$LOG_DIR"
+
+  configure_dashboards_security
 
   bash -c "cd '$osd_dir' && exec yarn start --no-base-path" \
     > "$LOG_DIR/dashboards.log" 2>&1 &
@@ -296,9 +399,14 @@ setup_demo_data() {
     return 1
   fi
 
-  info "Running demo.sh (loads ecommerce + UBI sample data)..."
-  (cd "$scripts_dir" && bash demo.sh 2>&1 | tail -20)
-  ok "Demo data loaded"
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    warn "demo.sh uses http://localhost:9200 — skipping for secured cluster."
+    warn "To load demo data, update demo.sh to use: curl -sk -u admin:$ADMIN_PASSWORD https://localhost:9200"
+  else
+    info "Running demo.sh (loads ecommerce + UBI sample data)..."
+    (cd "$scripts_dir" && bash demo.sh 2>&1 | tail -20)
+    ok "Demo data loaded"
+  fi
 }
 
 # =============================================================================
@@ -309,9 +417,18 @@ start_mcp_server() {
   info "=== Task 6: OpenSearch MCP Server ==="
   mkdir -p "$LOG_DIR"
 
+  local os_scheme="http"
+  local mcp_env="OPENSEARCH_HEADER_AUTH=true"
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    os_scheme="https"
+    mcp_env="$mcp_env OPENSEARCH_SSL_VERIFY=false"
+    info "MCP Server will connect via HTTPS (SSL verify disabled for demo certs)"
+  fi
+
   info "Starting MCP Server on port $MCP_PORT..."
-  OPENSEARCH_URL="http://localhost:$OS_PORT" \
+  OPENSEARCH_URL="${os_scheme}://localhost:$OS_PORT" \
   OPENSEARCH_HEADER_AUTH=true \
+  OPENSEARCH_SSL_VERIFY=$( [[ "$SECURITY_ENABLED" == "true" ]] && echo "false" || echo "true" ) \
     bash -c "exec uv tool run opensearch-mcp-server-py --transport stream --port $MCP_PORT" \
     > "$LOG_DIR/mcp-server.log" 2>&1 &
   disown
@@ -329,9 +446,13 @@ run_smoke_test() {
 
   # Test OpenSearch
   local os_status
-  os_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$OS_PORT")
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    os_status=$(curl -sk -u "admin:$ADMIN_PASSWORD" -o /dev/null -w "%{http_code}" "https://localhost:$OS_PORT")
+  else
+    os_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$OS_PORT")
+  fi
   if [[ "$os_status" == "200" ]]; then
-    ok "OpenSearch          :$OS_PORT  HTTP $os_status"
+    ok "OpenSearch          :$OS_PORT  HTTP $os_status $( [[ "$SECURITY_ENABLED" == "true" ]] && echo "(HTTPS + auth)" )"
   else
     err "OpenSearch          :$OS_PORT  HTTP $os_status"
   fi
@@ -339,7 +460,7 @@ run_smoke_test() {
   # Test Dashboards
   local osd_status
   osd_status=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$DASHBOARDS_PORT")
-  if [[ "$osd_status" == "200" || "$osd_status" == "302" ]]; then
+  if [[ "$osd_status" == "200" || "$osd_status" == "302" || "$osd_status" == "401" ]]; then
     ok "Dashboards          :$DASHBOARDS_PORT  HTTP $osd_status"
   else
     err "Dashboards          :$DASHBOARDS_PORT  HTTP $osd_status"
@@ -365,15 +486,20 @@ run_smoke_test() {
 
   # Test agent run
   info "Sending test query to agent..."
+  local auth_header=""
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    auth_header="-H \"Authorization: Basic $(echo -n "admin:$ADMIN_PASSWORD" | base64)\""
+  fi
   local response
-  response=$(curl -s -N -X POST "http://localhost:$AGENT_PORT/runs" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "threadId": "quickstart-test",
-      "runId": "quickstart-run-1",
-      "state": {},
-      "messages": [{"id": "msg-1", "role": "user", "content": "list all indices"}]
-    }' 2>&1 | grep -c "TOOL_CALL_RESULT" || true)
+  response=$(eval curl -s -N -X POST "http://localhost:$AGENT_PORT/runs" \
+    -H "\"Content-Type: application/json\"" \
+    $auth_header \
+    -d "'{
+      \"threadId\": \"quickstart-test\",
+      \"runId\": \"quickstart-run-1\",
+      \"state\": {},
+      \"messages\": [{\"id\": \"msg-1\", \"role\": \"user\", \"content\": \"list all indices\"}]
+    }'" 2>&1 | grep -c "TOOL_CALL_RESULT" || true)
 
   if [[ "$response" -gt 0 ]]; then
     ok "Agent run succeeded (received tool call results)"
@@ -382,7 +508,14 @@ run_smoke_test() {
   fi
 
   echo ""
-  info "All services running. Open http://localhost:$DASHBOARDS_PORT in your browser."
+  if [[ "$SECURITY_ENABLED" == "true" ]]; then
+    info "All services running with SECURITY ENABLED."
+    info "  Admin credentials: admin / $ADMIN_PASSWORD"
+    info "  OpenSearch: https://localhost:$OS_PORT (HTTPS)"
+  else
+    info "All services running."
+  fi
+  info "Open http://localhost:$DASHBOARDS_PORT in your browser."
 }
 
 # =============================================================================
@@ -467,18 +600,36 @@ do_full_setup() {
 # Main
 # =============================================================================
 
-case "${1:-}" in
+# Parse --security flag from any position
+for arg in "$@"; do
+  if [[ "$arg" == "--security" ]]; then
+    SECURITY_ENABLED=true
+  fi
+done
+
+# Parse primary command (first non-flag argument, or first arg)
+CMD=""
+for arg in "$@"; do
+  if [[ "$arg" != "--security" ]]; then
+    CMD="$arg"
+    break
+  fi
+done
+
+case "${CMD}" in
   --stop)    do_stop ;;
   --status)  do_status ;;
   --start)   do_start ;;
   --help|-h)
-    echo "Usage: $0 [--start|--stop|--status|--help]"
+    echo "Usage: $0 [--start|--stop|--status|--security|--help]"
     echo ""
-    echo "  (no args)   Full setup: clone, build, start all services, load demo data"
-    echo "  --start     Start services only (skip clone/build)"
-    echo "  --stop      Stop all running services"
-    echo "  --status    Check which services are running"
+    echo "  (no args)     Full setup: clone, build, start all services, load demo data"
+    echo "  --start       Start services only (skip clone/build)"
+    echo "  --stop        Stop all running services"
+    echo "  --status      Check which services are running"
+    echo "  --security    Enable security plugin (HTTPS + authentication)"
+    echo "                Combine with other commands: --start --security"
     ;;
   "")        do_full_setup ;;
-  *)         err "Unknown option: $1. Use --help for usage."; exit 1 ;;
+  *)         err "Unknown option: $CMD. Use --help for usage."; exit 1 ;;
 esac
