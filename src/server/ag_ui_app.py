@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -218,6 +219,20 @@ def create_app(config_override: ServerConfig | None = None) -> FastAPI:
         from server.config import validate_config_on_startup
 
         validate_config_on_startup(config_resolved)
+
+        # --- OpenTelemetry setup for agent observability ---
+        otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        if otel_endpoint:
+            from strands.telemetry import StrandsTelemetry
+
+            os.environ.setdefault("OTEL_SERVICE_NAME", "opensearch-agent-server")
+            StrandsTelemetry().setup_otlp_exporter()
+            log_info_event(
+                logger,
+                f"✓ OpenTelemetry tracing enabled → {otel_endpoint}",
+                "ag_ui.otel_enabled",
+                endpoint=otel_endpoint,
+            )
 
         global persistence, orchestrator
         persistence = None

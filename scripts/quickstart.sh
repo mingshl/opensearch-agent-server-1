@@ -40,6 +40,7 @@ ML_COMMONS_REPO="https://github.com/mingshl/ml-commons.git"
 ML_COMMONS_BRANCH="origin/main-test-search-relevance"
 DASHBOARDS_REPO="https://github.com/opensearch-project/OpenSearch-Dashboards.git"
 SEARCH_RELEVANCE_REPO="https://github.com/opensearch-project/search-relevance.git"
+MCP_SERVER_REPO="https://github.com/opensearch-project/opensearch-mcp-server-py.git"
 
 # --- Security ----------------------------------------------------------------
 SECURITY_REPO="https://github.com/opensearch-project/security.git"
@@ -372,6 +373,8 @@ start_agent_server() {
   fi
 
   info "Starting Agent Server..."
+  OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}" \
+  OTEL_SERVICE_NAME="opensearch-agent-server" \
   bash -c "cd '$PROJECT_ROOT' && source .venv/bin/activate && exec python run_server.py" \
     > "$LOG_DIR/agent-server.log" 2>&1 &
   disown
@@ -413,24 +416,55 @@ setup_demo_data() {
 # Task 6: Start MCP Server
 # =============================================================================
 
+setup_mcp_server() {
+  info "=== Setup: OpenSearch MCP Server (from source) ==="
+  local mcp_dir="$WORKSPACE/opensearch-mcp-server-py"
+
+  if [[ -d "$mcp_dir" ]]; then
+    info "MCP Server already cloned, pulling latest..."
+    (cd "$mcp_dir" && git pull --ff-only 2>/dev/null || true)
+  else
+    info "Cloning MCP Server (main branch for latest search relevance tools)..."
+    git clone --depth 1 "$MCP_SERVER_REPO" "$mcp_dir"
+  fi
+
+  # Install dependencies into a local venv
+  if [[ ! -d "$mcp_dir/.venv" ]]; then
+    info "Setting up MCP Server venv..."
+    (cd "$mcp_dir" && uv venv && uv pip install -e "." 2>&1 | tail -3)
+  fi
+
+  ok "MCP Server set up from source (includes search relevance tools)"
+}
+
 start_mcp_server() {
   info "=== Task 6: OpenSearch MCP Server ==="
   mkdir -p "$LOG_DIR"
+  local mcp_dir="$WORKSPACE/opensearch-mcp-server-py"
 
   local os_scheme="http"
-  local mcp_env="OPENSEARCH_HEADER_AUTH=true"
   if [[ "$SECURITY_ENABLED" == "true" ]]; then
     os_scheme="https"
-    mcp_env="$mcp_env OPENSEARCH_SSL_VERIFY=false"
     info "MCP Server will connect via HTTPS (SSL verify disabled for demo certs)"
   fi
 
-  info "Starting MCP Server on port $MCP_PORT..."
-  OPENSEARCH_URL="${os_scheme}://localhost:$OS_PORT" \
-  OPENSEARCH_HEADER_AUTH=true \
-  OPENSEARCH_SSL_VERIFY=$( [[ "$SECURITY_ENABLED" == "true" ]] && echo "false" || echo "true" ) \
-    bash -c "exec uv tool run opensearch-mcp-server-py --transport stream --port $MCP_PORT" \
-    > "$LOG_DIR/mcp-server.log" 2>&1 &
+  # Run from source if cloned, otherwise fall back to uv tool run
+  if [[ -d "$mcp_dir/.venv" ]]; then
+    info "Starting MCP Server from source on port $MCP_PORT..."
+    OPENSEARCH_URL="${os_scheme}://localhost:$OS_PORT" \
+    OPENSEARCH_HEADER_AUTH=true \
+    OPENSEARCH_SSL_VERIFY=$( [[ "$SECURITY_ENABLED" == "true" ]] && echo "false" || echo "true" ) \
+    OPENSEARCH_ENABLED_CATEGORIES="search_relevance" \
+      bash -c "cd '$mcp_dir' && source .venv/bin/activate && exec opensearch-mcp-server-py --transport stream --port $MCP_PORT" \
+      > "$LOG_DIR/mcp-server.log" 2>&1 &
+  else
+    info "Starting MCP Server (PyPI release) on port $MCP_PORT..."
+    OPENSEARCH_URL="${os_scheme}://localhost:$OS_PORT" \
+    OPENSEARCH_HEADER_AUTH=true \
+    OPENSEARCH_SSL_VERIFY=$( [[ "$SECURITY_ENABLED" == "true" ]] && echo "false" || echo "true" ) \
+      bash -c "exec uv tool run opensearch-mcp-server-py --transport stream --port $MCP_PORT" \
+      > "$LOG_DIR/mcp-server.log" 2>&1 &
+  fi
   disown
   save_pid "mcp-server" $!
 
@@ -579,6 +613,7 @@ do_full_setup() {
   setup_opensearch_core
   setup_ml_commons
   setup_dashboards
+  setup_mcp_server
 
   # Start services
   start_opensearch
