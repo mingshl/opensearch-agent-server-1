@@ -261,23 +261,35 @@ ruff check .
 ```
 opensearch-agent-server/
 ├── src/
-│   ├── agents/          # Agent implementations
-│   │   ├── art_agent.py      # Main agent using strands-agents
-│   │   └── fallback_agent.py # Fallback for errors
-│   ├── orchestrator/    # Routing and registry
-│   │   ├── router.py         # Context-based routing
-│   │   └── registry.py       # Agent registry
-│   ├── server/          # FastAPI application
-│   │   ├── ag_ui_app.py      # Main FastAPI app
-│   │   ├── run_routes.py     # AG-UI protocol endpoints
-│   │   ├── config.py         # Configuration management
-│   │   └── ...               # Middleware, auth, etc.
-│   └── utils/           # Utilities
-│       └── mcp_connection.py # OpenSearch MCP client
-├── tests/               # Test suite
-├── run_server.py        # Entry point
-├── pyproject.toml       # Project metadata
-└── .env.example         # Environment template
+│   ├── agents/                    # Agent implementations
+│   │   ├── art/                   # ART (Search Relevance Testing) agent
+│   │   │   ├── art_agent.py       # ART orchestrator agent
+│   │   │   └── specialized_agents.py  # Hypothesis, evaluation, UBI sub-agents
+│   │   ├── base.py                # Agent protocol / base types
+│   │   └── fallback_agent.py      # General OpenSearch assistant
+│   ├── orchestrator/              # Routing and registry
+│   │   ├── router.py              # Context-based routing
+│   │   └── registry.py            # Agent registry
+│   ├── server/                    # FastAPI application
+│   │   ├── ag_ui_app.py           # Main FastAPI app and lifespan
+│   │   ├── agent_orchestrator.py  # Orchestrator: routes requests to agents
+│   │   ├── run_routes.py          # AG-UI protocol endpoints
+│   │   ├── config.py              # Configuration management
+│   │   └── ...                    # Middleware, auth, rate limiting, etc.
+│   ├── tools/                     # Agent tools (local computation)
+│   │   └── art/                   # ART-specific tools
+│   │       └── experiment_tools.py  # Experiment results aggregation
+│   └── utils/                     # Shared utilities
+│       ├── logging_helpers.py     # Structured logging
+│       ├── monitored_tool.py      # Tool instrumentation wrapper
+│       └── ...                    # Persistence, activity monitor, etc.
+├── tests/
+│   ├── helpers/                   # Shared test helpers
+│   ├── integration/               # Integration tests
+│   └── unit/                      # Unit tests
+├── run_server.py                  # Entry point
+├── pyproject.toml                 # Project metadata and dependencies
+└── .env.example                   # Environment template
 ```
 
 ## API Endpoints
