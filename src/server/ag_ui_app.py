@@ -346,6 +346,20 @@ def create_app(config_override: ServerConfig | None = None) -> FastAPI:
         # to the MCP server (and ultimately to OpenSearch).
         orchestrator = AgentOrchestrator(router)
 
+        # Build a shared config that injects AG-UI context into the user message
+        # so the LLM is aware of the page the user is currently viewing.
+        from ag_ui_strands.config import StrandsAgentConfig
+
+        def _page_context_builder(input_data: Any, user_message: str) -> str:
+            if input_data.context:
+                context_text = "\n".join(
+                    f"{ctx.description}: {ctx.value}" for ctx in input_data.context
+                )
+                return f"{user_message}\n\n## Context from the application\n{context_text}"
+            return user_message
+
+        context_config = StrandsAgentConfig(state_context_builder=_page_context_builder)
+
         # Register default agent factory
         orchestrator.register_agent_factory(
             name="default",
@@ -353,6 +367,7 @@ def create_app(config_override: ServerConfig | None = None) -> FastAPI:
                 opensearch_url, headers=headers
             ),
             description="General OpenSearch assistant with MCP tools",
+            config=context_config,
         )
         log_info_event(
             logger,
@@ -367,6 +382,7 @@ def create_app(config_override: ServerConfig | None = None) -> FastAPI:
                 opensearch_url, headers=headers
             ),
             description="Search Relevance Tuning agent (ART)",
+            config=context_config,
         )
         log_info_event(
             logger,
