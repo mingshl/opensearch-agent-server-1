@@ -12,6 +12,7 @@ import boto3
 from dotenv import load_dotenv
 from strands import Agent
 from strands.models.bedrock import BedrockModel
+from strands.tools.mcp import MCPClient
 
 from utils.logging_helpers import get_logger, log_info_event
 from utils.monitored_tool import monitored_tool
@@ -198,19 +199,19 @@ Always include concrete metrics (CTR percentages, click counts, search volumes) 
 
 
 
-# Global variable to store MCP tools (will be set during initialization)
-_opensearch_tools: list = []
+# Global variable to store the authenticated MCPClient so specialized agents
+# route tool calls through the same transport (and auth headers).
+_mcp_client: MCPClient | None = None
 
 
-def set_opensearch_tools(tools: list[Any]) -> None:
-    """Set the OpenSearch MCP tools to be used by specialized agents."""
-    global _opensearch_tools
-    _opensearch_tools = tools
+def set_mcp_client(mcp_client: MCPClient) -> None:
+    """Store the authenticated MCPClient for use by specialized agents."""
+    global _mcp_client
+    _mcp_client = mcp_client
     log_info_event(
         logger,
-        f"[Agents] OpenSearch tools configured: {len(tools)} tools available",
-        "agents.opensearch_tools_configured",
-        tool_count=len(tools),
+        "[Agents] MCPClient configured for specialized agents",
+        "agents.mcp_client_configured",
     )
 
 
@@ -228,8 +229,8 @@ async def hypothesis_agent(query: str) -> str:
     Returns:
         str: Hypothesis with reasoning and recommendations for solving the issue
     """
-    if not _opensearch_tools:
-        return "Error: OpenSearch tools not configured. Please initialize MCP connection first."
+    if not _mcp_client:
+        return "Error: MCPClient not configured. Please initialize MCP connection first."
 
     try:
         model = BedrockModel(
@@ -238,18 +239,11 @@ async def hypothesis_agent(query: str) -> str:
             streaming=True,
         )
 
-        hypothesis_tools = [
-            # OpenSearch MCP tools
-            *_opensearch_tools,
-            # Experiment tools
-            aggregate_experiment_results,
-        ]
-
-        # Create specialized agent with OpenSearch and UBI tools
+        # Create specialized agent with authenticated MCPClient and experiment tools
         agent = Agent(
             model=model,
             system_prompt=HYPOTHESIS_GENERATOR_SYSTEM_PROMPT,
-            tools=hypothesis_tools,
+            tools=[_mcp_client, aggregate_experiment_results],
         )
 
         # Invoke agent and return response
@@ -279,8 +273,8 @@ async def evaluation_agent(query: str) -> str:
     Returns:
         str: Evaluation results with metrics, analysis, and recommendations
     """
-    if not _opensearch_tools:
-        return "Error: OpenSearch tools not configured. Please initialize MCP connection first."
+    if not _mcp_client:
+        return "Error: MCPClient not configured. Please initialize MCP connection first."
 
     try:
         model = BedrockModel(
@@ -289,19 +283,11 @@ async def evaluation_agent(query: str) -> str:
             streaming=True,
         )
 
-        # Combine OpenSearch MCP tools with evaluation-specific tools
-        evaluation_tools = [
-            # OpenSearch MCP tools
-            *_opensearch_tools,
-            # Experiment tools
-            aggregate_experiment_results,
-        ]
-
-        # Create specialized agent with all necessary tools
+        # Create specialized agent with authenticated MCPClient and experiment tools
         agent = Agent(
             model=model,
             system_prompt=EVALUATION_AGENT_SYSTEM_PROMPT,
-            tools=evaluation_tools,
+            tools=[_mcp_client, aggregate_experiment_results],
         )
 
         # Invoke agent and return response
@@ -331,8 +317,8 @@ async def user_behavior_analysis_agent(query: str) -> str:
     Returns:
         str: Analysis results with metrics, patterns, and actionable insights
     """
-    if not _opensearch_tools:
-        return "Error: OpenSearch tools not configured. Please initialize MCP connection first."
+    if not _mcp_client:
+        return "Error: MCPClient not configured. Please initialize MCP connection first."
 
     try:
         model = BedrockModel(
@@ -341,16 +327,11 @@ async def user_behavior_analysis_agent(query: str) -> str:
             streaming=True,
         )
 
-        ubi_tools = [
-            # OpenSearch MCP tools
-            *_opensearch_tools,
-        ]
-
-        # Create specialized agent with UBI analytics focus
+        # Create specialized agent with authenticated MCPClient
         agent = Agent(
             model=model,
             system_prompt=USER_BEHAVIOR_ANALYSIS_AGENT_SYSTEM_PROMPT,
-            tools=ubi_tools,
+            tools=[_mcp_client],
         )
 
         # Invoke agent and return response
