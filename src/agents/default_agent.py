@@ -56,11 +56,24 @@ def create_default_agent(
     mcp_server_url = os.getenv("MCP_SERVER_URL", DEFAULT_MCP_SERVER_URL)
 
     mcp_client = MCPClient(lambda: streamablehttp_client(mcp_server_url, headers=headers))
+    mcp_client.start()
+
+    tools = list(mcp_client.list_tools_sync())
 
     agent = Agent(
         system_prompt=DEFAULT_SYSTEM_PROMPT,
-        tools=[mcp_client],
+        tools=tools,
     )
+
+    # Keep a reference to the MCPClient on the agent to prevent garbage
+    # collection from closing the session.  When MCPClient is passed
+    # directly to Agent(tools=...) it is registered as a ToolProvider with
+    # consumer tracking; the AGUIStrandsAgent wrapper later extracts
+    # resolved tools and the original Agent may be GC'd, triggering
+    # remove_consumer → stop() which kills the MCP session for subsequent
+    # runs.  By starting the client manually and passing resolved tools we
+    # avoid the ToolProvider lifecycle entirely.
+    agent._mcp_client = mcp_client  # prevent GC
 
     tool_count = len(agent.tool_registry.registry)
     log_info_event(
